@@ -38,9 +38,31 @@ graphTest('basic graph build', async (t, graph) => {
     t.ok(cid)
     i++
   }
-  t.same(i, 6)
+  t.same(i, 5)
   let two = await graph.resolve('/one/two', newroot)
   t.ok(two.value.three)
+  let leaf = await graph.resolve('/one/three/four', newroot)
+  t.same(leaf.value, {test: 1234})
+})
+
+graphTest('graph updates', async (t, graph) => {
+  let block = await serialize({test: 1234})
+  graph.add('/one/two/edge', block)
+  let root = await graph.flush((await empty).cid)
+  graph.add('/one/three/four', block)
+
+  let newroot = await graph.flush(root)
+
+  let i = 0
+  for await (let cid of graph.store.cids()) {
+    t.ok(cid)
+    i++
+  }
+  t.same(i, 5)
+  let two = await graph.resolve('/one/two', newroot)
+  t.ok(two.value.edge)
+  let three = await graph.resolve('/one/three', newroot)
+  t.ok(three.value.four['/'])
   let leaf = await graph.resolve('/one/three/four', newroot)
   t.same(leaf.value, {test: 1234})
 })

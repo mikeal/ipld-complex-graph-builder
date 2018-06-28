@@ -20,8 +20,12 @@ class ComplexIPLDGraph {
     }
     this.cbor = cbor((...args) => store.get(...args))
     this.store = store
+    this._clear()
+  }
+  _clear () {
     this._pending = new Map()
     this._patches = new Map()
+    this._bulk = null
   }
   shardPath (path, handler) {
     path = path.split('/').filter(x => x)
@@ -69,6 +73,7 @@ class ComplexIPLDGraph {
           path = await this._realKey(path)
           this._bulk.put(block.cid, block.data)
           nest(this._patches, path, block.cid)
+          this._draining = null
         }
       })()
     }
@@ -86,6 +91,7 @@ class ComplexIPLDGraph {
       root = this.root
     }
     if (!root) throw new Error('No root node.')
+    root = mkcid(root)
     await this._kick()
     await this._kick()
 
@@ -104,17 +110,18 @@ class ComplexIPLDGraph {
     let _iter = async (map, node) => {
       for (let [key, value] of map.entries()) {
         if (value instanceof Map) {
+          let _node
+          let cid
           if (node[key]) {
-            let cid = mkcid(node[key]['/'])
-            let _node = this.get(cid)
-            let _cid = await _iter(value, _node)
-            node[key] = toLink(_cid)
-            if (clobber &&
-                _cid.toBaseEncodedString() !== cid.toBaseEncodedString()) {
-              this._bulk.del(cid)
-            }
+            cid = mkcid(node[key]['/'])
+            _node = await this.get(cid)
           } else {
-            node[key] = toLink(await _iter(value, {}))
+            _node = {}
+          }
+          node[key] = toLink(await _iter(value, _node))
+          if (clobber && cid &&
+              node[key]['/'] !== cid.toBaseEncodedString()) {
+            this._bulk.del(cid)
           }
         } else {
           if (!(value instanceof CID)) throw new Error('Value not CID.')
@@ -123,13 +130,21 @@ class ComplexIPLDGraph {
       }
       return mkcbor(node)
     }
+
     let start = Date.now()
     let cid = await _iter(this._patches, await this.get(root))
     this._graphBuildTime = Date.now() - start
 
+    if (clobber &&
+        root.toBaseEncodedString() !== cid.toBaseEncodedString()) {
+      this._bulk.del(root)
+    }
+
     start = Date.now()
     await this._bulk.flush()
     this._flushTime = Date.now() - start
+
+    this._clear()
 
     return cid
   }
