@@ -10,95 +10,97 @@ const nest = (map, key, cid) => {
   map.set(key.shift(), cid)
 }
 
-const mkcid = c => c instanceof CID ? c : new CID(c)
+const mkcid = c => c.toBaseEncodedString ? c : new CID(c)
 
 class ComplexIPLDGraph {
-  constructor (store, cbor) {
+  constructor (store, root, cbor) {
     this.shardPaths = new Map()
     if (!cbor) {
       cbor = fancyCBOR
     }
     this.cbor = cbor((...args) => store.get(...args))
     this.store = store
+    this.root = root
     this._clear()
+    this._bulk = store.bulk()
+    this._shardPaths = new Map()
   }
   _clear () {
+    this._getCache = new Map()
     this._pending = new Map()
     this._patches = new Map()
-    this._bulk = null
   }
   shardPath (path, handler) {
     path = path.split('/').filter(x => x)
     if (path[path.length - 1] !== '*') {
       throw new Error('All shard paths must end in "*".')
     }
-    this.shardPaths.set(path, handler)
+    nest(this._shardPaths, path, handler)
   }
-  async _realKey (path) {
+  _realKey (path) {
     path = path.split('/').filter(x => x)
     let _realpath = []
-    let _shardKeys = new Set(this.shardPaths.keys())
-
-    let i = 0
+    let maps = [this._shardPaths]
     while (path.length) {
       let key = path.shift()
+      let nextMaps = []
       let changed = false
-      for (let _path of Array.from(_shardKeys)) {
-        let _key = _path[i]
-        if (!_key) continue
-        if (_key === '*') {
-          _realpath.push(await this.shardPaths.get(_path)(key))
-          changed = true
-          break
-        } else if (_key.startsWith(':')) {
-          continue
-        } else if (_key === key) {
-          continue
-        } else {
-          _shardKeys.delete(_path)
+      for (let map of maps) {
+        for (let [_key, handler] of map.entries()) {
+          if (_key === key || _key.startsWith(':')) {
+            nextMaps.push(handler)
+          }
+          if (_key === '*' && !changed) {
+            _realpath.push(handler(key))
+            changed = true
+          }
         }
+        maps = nextMaps
       }
       if (!changed) _realpath.push(key)
-      i++
     }
-    // handlers can return '/' in keys
-    _realpath = _realpath.join('/').split('/')
-    return _realpath
+    return _realpath.join('/').split('/')
   }
-  async _kick () {
-    if (!this._bulk) this._bulk = await this.store.bulk()
-    if (!this._draining) {
-      this._draining = (async () => {
-        for (let [path, block] of this._pending.entries()) {
-          path = await this._realKey(path)
-          this._bulk.put(block.cid, block.data)
-          nest(this._patches, path, block.cid)
-          this._draining = null
+  _prime (path) {
+    /* pre-fetch intermediate node's we'll need to build the graph */
+    path = Array.from(path)
+    let run = (parent) => {
+      if (path.length) {
+        let key = path.shift()
+        if (parent[key] && parent[key]['/']) {
+          this.get(mkcid(parent[key]['/'])).then(run)
         }
-      })()
+      }
     }
-    return this._draining
+    this.get(this.root).then(run)
   }
   _queue (path, block) {
     this._pending.set(path, block)
-    this._kick()
+
+    path = this._realKey(path)
+    this._prime(path)
+    nest(this._patches, path, block.cid)
+    this._draining = null
   }
-  add (path, block) {
-    this._queue(path, block)
-  }
-  async flush (root, clobber = true) {
-    if (!root) {
-      root = this.root
+  async add (path, block) {
+    if (this._spent) {
+      throw new Error('This graph instance has already been flushed.')
     }
+    this._queue(path, block)
+    return this._bulk.put(block.cid, block.data)
+  }
+  async flush () {
+    if (this._spent) {
+      throw new Error('This graph instance has already been flushed.')
+    }
+    let root = this.root
     if (!root) throw new Error('No root node.')
     root = mkcid(root)
-    await this._kick()
-    await this._kick()
 
     let mkcbor = async obj => {
       let cid
       for await (let block of this.cbor.serialize(obj)) {
-        this._bulk.put(block.cid, block.data)
+        await this._bulk.put(block.cid, block.data)
         cid = block.cid
       }
       return cid
@@ -107,24 +109,23 @@ class ComplexIPLDGraph {
       return {'/': cid.toBaseEncodedString()}
     }
 
+    this.nodesWalked = 0
+
     let _iter = async (map, node) => {
+      this.nodesWalked++
       for (let [key, value] of map.entries()) {
         if (value instanceof Map) {
           let _node
           let cid
-          if (node[key]) {
+          if (node[key] && node[key]['/']) {
             cid = mkcid(node[key]['/'])
             _node = await this.get(cid)
           } else {
             _node = {}
           }
           node[key] = toLink(await _iter(value, _node))
-          if (clobber && cid &&
-              node[key]['/'] !== cid.toBaseEncodedString()) {
-            this._bulk.del(cid)
-          }
         } else {
-          if (!(value instanceof CID)) throw new Error('Value not CID.')
+          if (!(value.toBaseEncodedString)) throw new Error('Value not CID.')
           node[key] = toLink(value)
         }
       }
@@ -135,23 +136,20 @@ class ComplexIPLDGraph {
     let cid = await _iter(this._patches, await this.get(root))
     this._graphBuildTime = Date.now() - start
 
-    if (clobber &&
-        root.toBaseEncodedString() !== cid.toBaseEncodedString()) {
-      this._bulk.del(root)
-    }
-
-    start = Date.now()
     await this._bulk.flush()
-    this._flushTime = Date.now() - start
 
     this._clear()
-
+    this._spent = true
     return cid
   }
 
   async get (cid) {
-    let buffer = await this.store.get(cid)
-    return this.cbor.deserialize(buffer)
+    if (cid.toBaseEncodedString) cid = cid.toBaseEncodedString()
+    if (!this._getCache.has(cid)) {
+      let p = this.store.get(cid).then(b => this.cbor.deserialize(b))
+      this._getCache.set(cid, p)
+    }
+    return this._getCache.get(cid)
   }
 
   async resolve (path, root) {

@@ -2,7 +2,7 @@ const {test} = require('tap')
 const complex = require('../')
 
 test('test path sharding', async t => {
-  let graph = complex()
+  let graph = complex({bulk: () => {}})
   graph.shardPath('/one/:two/*', key => {
     t.same(key, 'three')
     return 'four'
@@ -12,7 +12,7 @@ test('test path sharding', async t => {
 })
 
 test('test path sharding with slash', async t => {
-  let graph = complex()
+  let graph = complex({bulk: () => {}})
   graph.shardPath('/one/:two/*', key => {
     t.same(key, 'three')
     return 'four/five'
@@ -22,7 +22,7 @@ test('test path sharding with slash', async t => {
 })
 
 test('test shard two paths', async t => {
-  let graph = complex()
+  let graph = complex({bulk: () => {}})
   graph.shardPath('/one/:two/*', key => {
     t.same(key, 'three')
     return 'four/five'
@@ -38,7 +38,7 @@ test('test shard two paths', async t => {
 })
 
 test('test shard twice in same path', async t => {
-  let graph = complex()
+  let graph = complex({bulk: () => {}})
   graph.shardPath('/one/*', key => {
     t.same(key, 'two')
     return 2

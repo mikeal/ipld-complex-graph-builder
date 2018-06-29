@@ -19,7 +19,7 @@ const graphTest = async (str, cb) => {
   let store = createStore(dir)
   let block = await empty
   await store.put(block.cid, block.data)
-  let graph = complex(store)
+  let graph = complex(store, block.cid)
   await test(str, async t => {
     t.tearDown(() => {
       rimraf.sync(dir)
@@ -32,13 +32,13 @@ graphTest('basic graph build', async (t, graph) => {
   let block = await serialize({test: 1234})
   graph.add('/one/two/three', block)
   graph.add('/one/three/four', block)
-  let newroot = await graph.flush((await empty).cid)
+  let newroot = await graph.flush()
   let i = 0
   for await (let cid of graph.store.cids()) {
     t.ok(cid)
     i++
   }
-  t.same(i, 5)
+  t.same(i, 6)
   let two = await graph.resolve('/one/two', newroot)
   t.ok(two.value.three)
   let leaf = await graph.resolve('/one/three/four', newroot)
@@ -48,17 +48,18 @@ graphTest('basic graph build', async (t, graph) => {
 graphTest('graph updates', async (t, graph) => {
   let block = await serialize({test: 1234})
   graph.add('/one/two/edge', block)
-  let root = await graph.flush((await empty).cid)
-  graph.add('/one/three/four', block)
+  let root = await graph.flush()
 
-  let newroot = await graph.flush(root)
+  graph = complex(graph.store, root)
+  graph.add('/one/three/four', block)
+  let newroot = await graph.flush()
 
   let i = 0
   for await (let cid of graph.store.cids()) {
     t.ok(cid)
     i++
   }
-  t.same(i, 5)
+  t.same(i, 8)
   let two = await graph.resolve('/one/two', newroot)
   t.ok(two.value.edge)
   let three = await graph.resolve('/one/three', newroot)
