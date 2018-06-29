@@ -143,7 +143,7 @@ class ComplexIPLDGraph {
     return cid
   }
 
-  async get (cid) {
+  get (cid) {
     if (cid.toBaseEncodedString) cid = cid.toBaseEncodedString()
     if (!this._getCache.has(cid)) {
       let p = this.store.get(cid).then(b => this.cbor.deserialize(b))
